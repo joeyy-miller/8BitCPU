@@ -17,6 +17,7 @@ class EightBitComputer:
         }
         self.interrupt_vector = 0xFE  # Interrupt vector address
         self.interrupt_enabled = True
+        self.last_instruction = 0
         self.halted = False
         self.io_buffer = ""
         self.text_display = [[0 for _ in range(16)] for _ in range(4)]  # 4x16 character display
@@ -25,7 +26,9 @@ class EightBitComputer:
         self.cursor_x = 0
         self.cursor_y = 0
         self.scroll_offset = 0
+        self.memory_size = 256 # define memory size
         self.debug = True  # Set to False to disable debug prints
+        self.delay = 0 # ability to slow down the computer
 
     def load_program(self, program):
         for i, instruction in enumerate(program):
@@ -35,9 +38,9 @@ class EightBitComputer:
                 print(f"Warning: Program too large for memory. Truncated at byte {i}.")
                 break
         print(f"Loaded {min(len(program), len(self.memory))} bytes into memory.")
-
+        
     def fetch(self):
-        if self.registers['PC'] < len(self.memory):
+        if self.registers['PC'] < self.memory_size:
             instruction = self.memory[self.registers['PC']]
             self.registers['PC'] += 1
             if self.debug:
@@ -71,6 +74,7 @@ class EightBitComputer:
             return 0
 
     def execute(self, instruction):
+        self.last_instruction = instruction
         opcode = instruction >> 4
         operand = instruction & 0x0F
         if self.debug:
@@ -121,28 +125,21 @@ class EightBitComputer:
             self.registers['A'] = (self.registers['A'] >> 1) & 0xFF
             if self.debug:
                 print(f"SHR: A >> 1, A = {self.registers['A']:02X}, C = {self.flags['C']}")
-        elif opcode == 0xA:  # JMP
-            self.registers['PC'] = (self.memory[self.registers['PC']] << 4) | operand
-            if self.debug:
-                print(f"JMP: PC = {self.registers['PC']:02X}")
-        elif opcode == 0xB:  # JZ
+        elif opcode == 0xA:  # JMP (relative)
+            offset = self.memory[self.registers['PC']]
+            self.registers['PC'] = (self.registers['PC'] + offset) % self.memory_size
+        elif opcode == 0xB:  # JZ (relative)
+            offset = self.memory[self.registers['PC']]
             if self.flags['Z']:
-                self.registers['PC'] = (self.memory[self.registers['PC']] << 4) | operand
-                if self.debug:
-                    print(f"JZ: Zero flag set, jumping to {self.registers['PC']:02X}")
+                self.registers['PC'] = (self.registers['PC'] + offset) % self.memory_size
             else:
                 self.registers['PC'] += 1
-                if self.debug:
-                    print("JZ: Zero flag not set, not jumping")
-        elif opcode == 0xC:  # JNZ
+        elif opcode == 0xC:  # JNZ (relative)
+            offset = self.memory[self.registers['PC']]
             if not self.flags['Z']:
-                self.registers['PC'] = (self.memory[self.registers['PC']] << 4) | operand
-                if self.debug:
-                    print(f"JNZ: Zero flag not set, jumping to {self.registers['PC']:02X}")
+                self.registers['PC'] = (self.registers['PC'] + offset) % self.memory_size
             else:
                 self.registers['PC'] += 1
-                if self.debug:
-                    print("JNZ: Zero flag set, not jumping")
         elif opcode == 0xD:  # CALL
             self.push((self.registers['PC'] + 1) & 0xFF)
             self.registers['PC'] = (self.memory[self.registers['PC']] << 4) | operand
@@ -217,9 +214,9 @@ class EightBitComputer:
         self.cursor_y = 0
 
     def set_pixel(self, x, y, value):
-        if self.display_mode == 'graphics':
-            if 0 <= x < 32 and 0 <= y < 32:
-                self.graphics_display[y][x] = value
+        if 0 <= x < 32 and 0 <= y < 32:
+            self.graphics_display[y][x] = value
+            print(f"Set pixel at ({x}, {y}) to {value}")
 
     def scroll_display(self, lines):
         if self.display_mode == 'text':
@@ -239,13 +236,11 @@ class EightBitComputer:
             instruction = self.fetch()
             self.execute(instruction)
             instruction_count += 1
-            # Simulate a timer interrupt every 100 instructions
-            if instruction_count % 100 == 0:
-                self.handle_interrupt()
+            time.sleep(self.delay)  # Add delay between instructions
             # Safety check to prevent infinite loops
-            if instruction_count > 10000:
-                print("Execution limit reached. Halting.")
-                break
+            #if instruction_count > 248000: # 248k max instructions
+            print("Execution limit reached. Halting.")
+                #break
         print(f"Program halted after executing {instruction_count} instructions.")
 
 class Assembler:
@@ -294,7 +289,12 @@ class Assembler:
                         operand = self.labels[parts[1]]
                     else:
                         operand = int(parts[1], 16) if parts[1].startswith('0x') else int(parts[1])
-                    if opcode in [0xA, 0xB, 0xC, 0xD]:  # Jump and call instructions
+                    if opcode in [0xA, 0xB, 0xC]:  # Jump instructions (now relative)
+                        assembled_program.append(opcode << 4)
+                        # Calculate relative jump
+                        jump_target = operand - (len(assembled_program) + 1)
+                        assembled_program.append(jump_target & 0xFF)
+                    elif opcode == 0xD:  # CALL instruction (still absolute)
                         assembled_program.append(opcode << 4 | (operand >> 8))
                         assembled_program.append(operand & 0xFF)
                     elif opcode == 0x0:  # LOAD
@@ -306,6 +306,7 @@ class Assembler:
                     assembled_program.append(opcode)
 
         return assembled_program
+
 
     def parse_macro(self, lines, start_index):
         macro_def = lines[start_index].split()
